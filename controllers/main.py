@@ -129,20 +129,67 @@ class SaasApiController(http.Controller):
         env, custom_cr = self._get_env()
         try:
             user_record = None
+            federated_auth_success = False
+            
+            # 1. Try to authenticate against the SaaS Master first (Federated Auth)
             try:
-                wsgienv = {
-                    'interactive': True,
-                    'base_location': request.httprequest.url_root.rstrip('/'),
-                    'HTTP_HOST': request.httprequest.environ['HTTP_HOST'],
-                    'REMOTE_ADDR': request.httprequest.environ['REMOTE_ADDR'],
-                }
-                credential = {'login': usr, 'password': pwd, 'type': 'password'}
-                auth_info = env['res.users'].authenticate(credential, wsgienv)
-                uid = auth_info.get('uid')
-                if uid:
-                    user_record = env['res.users'].browse(uid)
+                import requests
+                SAAS_MASTER_URL = 'https://saas.havano.pro'
+                login_url = f"{SAAS_MASTER_URL.rstrip('/')}/api/v1/auth/login"
+                response = requests.post(
+                    login_url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "method": "call",
+                        "params": {
+                            "email": usr,
+                            "password": pwd,
+                            "db": "saas"
+                        }
+                    },
+                    timeout=5
+                )
+                response.raise_for_status()
+                result = response.json().get('result', {})
+                if result.get('success', True) and result.get('data'):
+                    user_data = result.get('data')
+                    email = user_data.get('email') or usr
+                    name = user_data.get('name') or email
+                    
+                    # Find or create user locally
+                    user_record = env['res.users'].search([('login', '=', email)], limit=1)
+                    if not user_record:
+                        _logger.info("Auto-provisioning federated user %s", email)
+                        user_record = env['res.users'].with_context(no_reset_password=True).create({
+                            'name': name,
+                            'login': email,
+                            'email': email,
+                            'groups_id': [(6, 0, [env.ref('base.group_user').id, env.ref('base.group_erp_manager').id])]
+                        })
+                        import uuid
+                        user_record.password = uuid.uuid4().hex
+                        
+                    federated_auth_success = True
+                    _logger.info("Federated Login success for %s via SaaS Master", usr)
             except Exception as e:
-                _logger.warning(f"Odoo auth failed for {usr} on database {db}: {e}")
+                _logger.warning(f"Federated auth failed/skipped for {usr}: {e}")
+
+            # 2. Fallback to local Odoo login if federated login was not successful
+            if not federated_auth_success:
+                try:
+                    wsgienv = {
+                        'interactive': True,
+                        'base_location': request.httprequest.url_root.rstrip('/'),
+                        'HTTP_HOST': request.httprequest.environ['HTTP_HOST'],
+                        'REMOTE_ADDR': request.httprequest.environ['REMOTE_ADDR'],
+                    }
+                    credential = {'login': usr, 'password': pwd, 'type': 'password'}
+                    auth_info = env['res.users'].authenticate(credential, wsgienv)
+                    uid = auth_info.get('uid')
+                    if uid:
+                        user_record = env['res.users'].browse(uid)
+                except Exception as e:
+                    _logger.warning(f"Local Odoo auth failed for {usr} on database {db}: {e}")
 
             if not user_record:
                 return self._make_json_response({"error": "Invalid credentials"}, status=401)
