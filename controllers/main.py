@@ -2939,13 +2939,17 @@ class SaasApiController(http.Controller):
     @http.route([
         '/api/method/saas_api.www.api.get_pl_cost_center',
         '/saas_api/get_pl_cost_center'
-    ], type='http', auth='public', methods=['POST', 'OPTIONS'], csrf=False)
+    ], type='http', auth='public', methods=['GET', 'POST', 'OPTIONS'], csrf=False)
     def get_pl_cost_center(self, **kwargs):
         if request.httprequest.method == 'OPTIONS':
             return self._make_json_response({}, status=200)
 
         token = request.httprequest.headers.get('Authorization')
-        params = self._get_request_json()
+        params = {}
+        if request.httprequest.method == 'POST':
+            params = self._get_request_json()
+        params.update(request.httprequest.args.to_dict())
+
         if not token:
             token = params.get('token')
 
@@ -3054,6 +3058,238 @@ class SaasApiController(http.Controller):
             
         except Exception as e:
             _logger.exception("SaaS API: Error fetching PL cost center report")
+            return self._make_json_response({"error": str(e)}, status=500)
+        finally:
+            if custom_cr:
+                custom_cr.close()
+
+    # =========================================================================
+    # /api/method/saas_api.www.api.get_sales_invoice_report
+    # =========================================================================
+    @http.route([
+        '/api/method/saas_api.www.api.get_sales_invoice_report',
+        '/saas_api/get_sales_invoice_report'
+    ], type='http', auth='public', methods=['GET', 'POST', 'OPTIONS'], csrf=False)
+    def get_sales_invoice_report(self, **kwargs):
+        if request.httprequest.method == 'OPTIONS':
+            return self._make_json_response({}, status=200)
+
+        token = request.httprequest.headers.get('Authorization')
+        params = {}
+        if request.httprequest.method == 'POST':
+            params = self._get_request_json()
+        params.update(request.httprequest.args.to_dict())
+
+        if not token:
+            token = params.get('token')
+
+        uid, login = self._verify_token(token)
+        if not uid:
+            return self._make_json_response({"error": "Unauthorized"}, status=401)
+
+        env, custom_cr = self._get_env(user_id=uid)
+        
+        try:
+            company_name = params.get('company')
+            cost_center_name = params.get('cost_center')
+            user_login_or_name = params.get('user')
+            from_date = params.get('from_date') or params.get('date_from')
+            to_date = params.get('to_date') or params.get('date_to')
+
+            company = None
+            if company_name:
+                company = env['res.company'].search([('name', '=', company_name)], limit=1)
+                if not company:
+                    company = env['res.company'].search([('name', 'ilike', company_name)], limit=1)
+            if not company:
+                company = env.company
+
+            user_record = None
+            if user_login_or_name:
+                user_record = env['res.users'].search([('login', '=', user_login_or_name)], limit=1)
+                if not user_record:
+                    user_record = env['res.users'].search([('name', '=', user_login_or_name)], limit=1)
+
+            analytic_account = None
+            if cost_center_name:
+                analytic_account = env['account.analytic.account'].search([
+                    ('company_id', '=', company.id),
+                    ('name', '=', cost_center_name)
+                ], limit=1)
+                if not analytic_account:
+                    analytic_account = env['account.analytic.account'].search([
+                        ('company_id', '=', company.id),
+                        ('name', 'ilike', cost_center_name)
+                    ], limit=1)
+                if not analytic_account:
+                    analytic_account = env['account.analytic.account'].search([
+                        ('name', '=', cost_center_name)
+                    ], limit=1)
+                if not analytic_account:
+                    analytic_account = env['account.analytic.account'].search([
+                        ('name', 'ilike', cost_center_name)
+                    ], limit=1)
+
+            # Build domain for posted customer invoices (out_invoice)
+            domain = [
+                ('move_type', '=', 'out_invoice'),
+                ('state', '=', 'posted'),
+                ('company_id', '=', company.id)
+            ]
+            if from_date:
+                domain.append(('invoice_date', '>=', from_date))
+            if to_date:
+                domain.append(('invoice_date', '<=', to_date))
+            if user_record:
+                domain.append(('invoice_user_id', '=', user_record.id))
+
+            if analytic_account:
+                analytic_line_domain = [('account_id', '=', analytic_account.id), ('company_id', '=', company.id)]
+                if from_date:
+                    analytic_line_domain.append(('date', '>=', from_date))
+                if to_date:
+                    analytic_line_domain.append(('date', '<=', to_date))
+                
+                analytic_lines = env['account.analytic.line'].search(analytic_line_domain)
+                move_ids = analytic_lines.mapped('move_line_id.move_id').filtered(
+                    lambda m: m.move_type == 'out_invoice' and m.state == 'posted'
+                )
+                if user_record:
+                    move_ids = move_ids.filtered(lambda m: m.invoice_user_id == user_record or m.create_uid == user_record)
+                
+                if from_date:
+                    move_ids = move_ids.filtered(lambda m: m.invoice_date and str(m.invoice_date) >= from_date)
+                if to_date:
+                    move_ids = move_ids.filtered(lambda m: m.invoice_date and str(m.invoice_date) <= to_date)
+                
+                total_count = len(move_ids)
+                total_amount = sum(move_ids.mapped('amount_total'))
+            else:
+                moves = env['account.move'].search(domain)
+                total_count = len(moves)
+                total_amount = sum(moves.mapped('amount_total'))
+
+            return self._make_json_response({
+                "message": {
+                    "message": {
+                        "status": "success",
+                        "total_count": total_count,
+                        "total_amount": total_amount
+                    }
+                }
+            })
+            
+        except Exception as e:
+            _logger.exception("SaaS API: Error fetching Sales Invoice Report")
+            return self._make_json_response({"error": str(e)}, status=500)
+        finally:
+            if custom_cr:
+                custom_cr.close()
+
+    # =========================================================================
+    # /api/method/havano_addons.www.api.user_stock_report
+    # =========================================================================
+    @http.route([
+        '/api/method/havano_addons.www.api.user_stock_report',
+        '/api/method/saas_api.www.api.user_stock_report',
+        '/saas_api/user_stock_report'
+    ], type='http', auth='public', methods=['GET', 'POST', 'OPTIONS'], csrf=False)
+    def user_stock_report(self, **kwargs):
+        if request.httprequest.method == 'OPTIONS':
+            return self._make_json_response({}, status=200)
+
+        token = request.httprequest.headers.get('Authorization')
+        params = {}
+        if request.httprequest.method == 'POST':
+            params = self._get_request_json()
+        params.update(request.httprequest.args.to_dict())
+
+        if not token:
+            token = params.get('token')
+
+        uid, login = self._verify_token(token)
+        if not uid:
+            return self._make_json_response({"error": "Unauthorized"}, status=401)
+
+        env, custom_cr = self._get_env(user_id=uid)
+        
+        try:
+            company_name = params.get('company')
+            company = None
+            if company_name:
+                company = env['res.company'].search([('name', '=', company_name)], limit=1)
+                if not company:
+                    company = env['res.company'].search([('name', 'ilike', company_name)], limit=1)
+            if not company:
+                company = env.company
+
+            # Find all warehouses for the company
+            warehouses = env['stock.warehouse'].search([('company_id', '=', company.id)])
+
+            data_list = []
+
+            for wh in warehouses:
+                # Find all internal locations within this warehouse
+                locations = env['stock.location'].search([
+                    ('id', 'child_of', wh.view_location_id.id),
+                    ('usage', '=', 'internal')
+                ])
+                
+                # Search active products quants in these locations
+                quants = env['stock.quant'].search([
+                    ('location_id', 'in', locations.ids),
+                    ('product_id.active', '=', True)
+                ])
+                
+                total_qty = 0.0
+                total_cost_value = 0.0
+                total_selling_value = 0.0
+                
+                for q in quants:
+                    qty = q.quantity
+                    product = q.product_id
+                    selling_price = product.list_price or 0.0
+                    cost_price = product.standard_price or 0.0
+                    
+                    total_qty += qty
+                    total_cost_value += (qty * cost_price)
+                    total_selling_value += (qty * selling_price)
+                
+                data_list.append({
+                    "warehouse": wh.name,
+                    "warehouse_code": wh.code,
+                    "cost_value": total_cost_value,
+                    "selling_value": total_selling_value,
+                    "on_hand_total": total_qty,
+                    "qty_on_hand": total_qty,
+                    "total_value": total_cost_value,
+                    "total_value_on_selling_price": total_selling_value
+                })
+
+            # Append a Total summary row
+            total_qty_all = sum(d['on_hand_total'] for d in data_list)
+            total_cost_all = sum(d['cost_value'] for d in data_list)
+            total_selling_all = sum(d['selling_value'] for d in data_list)
+            
+            data_list.append({
+                "warehouse": "Total",
+                "warehouse_code": "Total",
+                "cost_value": total_cost_all,
+                "selling_value": total_selling_all,
+                "on_hand_total": total_qty_all,
+                "qty_on_hand": total_qty_all,
+                "total_value": total_cost_all,
+                "total_value_on_selling_price": total_selling_all
+            })
+
+            return self._make_json_response({
+                "message": {
+                    "data": data_list
+                }
+            })
+            
+        except Exception as e:
+            _logger.exception("SaaS API: Error generating User Stock Report")
             return self._make_json_response({"error": str(e)}, status=500)
         finally:
             if custom_cr:
