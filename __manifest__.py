@@ -5,7 +5,7 @@
     'category': 'Sales',
     'summary': 'REST API endpoints for SaaS integration (login, get products, make sale, add item)',
     'description': """
-        Exposes REST JSON API endpoints for SaaS integrations:
+        Exposes REST JSON API endpoint for SaaS integrations:
         - POST /saas_api/login
         - POST /saas_api/products (and get_products)
         - POST /saas_api/make_sale
