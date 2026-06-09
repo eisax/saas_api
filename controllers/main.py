@@ -2932,3 +2932,129 @@ class SaasApiController(http.Controller):
         finally:
             if custom_cr:
                 custom_cr.close()
+
+    # =========================================================================
+    # /api/method/saas_api.www.api.get_pl_cost_center
+    # =========================================================================
+    @http.route([
+        '/api/method/saas_api.www.api.get_pl_cost_center',
+        '/saas_api/get_pl_cost_center'
+    ], type='http', auth='public', methods=['POST', 'OPTIONS'], csrf=False)
+    def get_pl_cost_center(self, **kwargs):
+        if request.httprequest.method == 'OPTIONS':
+            return self._make_json_response({}, status=200)
+
+        token = request.httprequest.headers.get('Authorization')
+        params = self._get_request_json()
+        if not token:
+            token = params.get('token')
+
+        uid, login = self._verify_token(token)
+        if not uid:
+            return self._make_json_response({"error": "Unauthorized"}, status=401)
+
+        env, custom_cr = self._get_env(user_id=uid)
+        
+        try:
+            company_name = params.get('company')
+            cost_center_name = params.get('cost_center')
+            from_date = params.get('from_date') or params.get('date_from')
+            to_date = params.get('to_date') or params.get('date_to')
+            
+            company = None
+            if company_name:
+                company = env['res.company'].search([('name', '=', company_name)], limit=1)
+                if not company:
+                    company = env['res.company'].search([('name', 'ilike', company_name)], limit=1)
+            if not company:
+                company = env.company
+
+            analytic_account = None
+            if cost_center_name:
+                analytic_account = env['account.analytic.account'].search([
+                    ('company_id', '=', company.id),
+                    ('name', '=', cost_center_name)
+                ], limit=1)
+                if not analytic_account:
+                    analytic_account = env['account.analytic.account'].search([
+                        ('company_id', '=', company.id),
+                        ('name', 'ilike', cost_center_name)
+                    ], limit=1)
+                if not analytic_account:
+                    analytic_account = env['account.analytic.account'].search([
+                        ('name', '=', cost_center_name)
+                    ], limit=1)
+                if not analytic_account:
+                    analytic_account = env['account.analytic.account'].search([
+                        ('name', 'ilike', cost_center_name)
+                    ], limit=1)
+
+            income = 0.0
+            expense = 0.0
+
+            if analytic_account:
+                domain = [('account_id', '=', analytic_account.id), ('company_id', '=', company.id)]
+                if from_date:
+                    domain.append(('date', '>=', from_date))
+                if to_date:
+                    domain.append(('date', '<=', to_date))
+                
+                lines = env['account.analytic.line'].search(domain)
+                for line in lines:
+                    is_income = False
+                    is_expense = False
+                    if line.general_account_id:
+                        acc_type = line.general_account_id.account_type
+                        if acc_type in ['income', 'income_other']:
+                            is_income = True
+                        elif acc_type in ['expense', 'expense_depreciation', 'expense_direct_cost']:
+                            is_expense = True
+                    
+                    if not is_income and not is_expense:
+                        if line.amount >= 0:
+                            is_income = True
+                        else:
+                            is_expense = True
+                            
+                    if is_income:
+                        income += line.amount
+                    else:
+                        expense += abs(line.amount)
+            else:
+                # Fallback to company-wide general ledger accounts
+                domain = [
+                    ('company_id', '=', company.id),
+                    ('display_type', 'not in', ('line_section', 'line_note')),
+                    ('parent_state', '=', 'posted'),
+                    ('account_id.account_type', 'in', ['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost'])
+                ]
+                if from_date:
+                    domain.append(('date', '>=', from_date))
+                if to_date:
+                    domain.append(('date', '<=', to_date))
+                
+                amls = env['account.move.line'].search(domain)
+                for aml in amls:
+                    acc_type = aml.account_id.account_type
+                    if acc_type in ['income', 'income_other']:
+                        income += (aml.credit - aml.debit)
+                    elif acc_type in ['expense', 'expense_depreciation', 'expense_direct_cost']:
+                        expense += (aml.debit - aml.credit)
+
+            gross_profit_loss = income - expense
+
+            return self._make_json_response({
+                "message": {
+                    "income": income,
+                    "expense": expense,
+                    "gross_profit__loss": gross_profit_loss,
+                    "report_summary": []
+                }
+            })
+            
+        except Exception as e:
+            _logger.exception("SaaS API: Error fetching PL cost center report")
+            return self._make_json_response({"error": str(e)}, status=500)
+        finally:
+            if custom_cr:
+                custom_cr.close()
