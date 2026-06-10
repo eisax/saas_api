@@ -3007,14 +3007,28 @@ class SaasApiController(http.Controller):
             if to_date:
                 base_domain.append(('date', '<=', to_date))
 
-            amls = env['account.move.line'].search(base_domain)
+            amls_before_count = env['account.move.line'].search_count(base_domain)
 
-            # Filter to cost center via analytic_distribution JSON key
+            # ── Filter by analytic account (cost center) using ORM domain ─────
+            # Odoo stores analytic_distribution as {comma-separated-ids: pct}.
+            # Using 'distribution_analytic_account_ids' in domain is the correct
+            # and indexed approach (uses the GIN index set up by AnalyticMixin).
             if analytic_account:
-                analytic_id_str = str(analytic_account.id)
-                amls = amls.filtered(
-                    lambda l: l.analytic_distribution and analytic_id_str in l.analytic_distribution
-                )
+                analytic_domain = base_domain + [
+                    ('analytic_distribution', 'in', [analytic_account.id])
+                ]
+                amls = env['account.move.line'].search(analytic_domain)
+            else:
+                amls = env['account.move.line'].search(base_domain)
+
+            _logger.warning(
+                "SaaS PL DEBUG: cost_center=%r analytic_id=%s "
+                "AMLs_total=%s AMLs_after_filter=%s",
+                cost_center_name,
+                analytic_account.id if analytic_account else None,
+                amls_before_count,
+                len(amls),
+            )
 
             # Aggregate per account into P&L sections
             sections = {
