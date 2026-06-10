@@ -669,4 +669,144 @@ Taxes can be passed as:
 
 ---
 
+## 12. Pharmacy & Clinic Endpoints
+
+Endpoints designed for handling clinical resources (active only when `hao_activate_pharmacy` is enabled).
+
+### `POST /saas_api/get_doctors`
+Retrieves all registered doctors (`is_doctor=True`).
+
+**Response**
+```json
+{
+  "message": {
+    "doctors": [
+      {
+        "id": 119,
+        "name": "Dr David Parirenyatwa",
+        "email": "dr.tatenda@example.com",
+        "phone": "+263779999999",
+        "doctor_reg_no": "DR-2026-001-A",
+        "is_doctor": true
+      }
+    ]
+  }
+}
+```
+
+### `POST /saas_api/add_doctor`
+Creates a new doctor.
+
+**Request Body**
+```json
+{
+  "token": "<token>",
+  "name": "Dr John Doe",
+  "email": "john.doe@clinic.com",
+  "phone": "0771234567",
+  "doctor_reg_no": "REG-12345"
+}
+```
+
+### `POST /saas_api/edit_doctor`
+Updates an existing doctor.
+
+**Request Body**
+```json
+{
+  "token": "<token>",
+  "doctor_id": 119,
+  "phone": "0788999999"
+}
+```
+
+### `POST /saas_api/get_dosages`
+Retrieves all pharmacy dosages.
+
+**Response**
+```json
+{
+  "message": {
+    "dosages": [
+      {
+        "id": 2,
+        "code": "55339564899",
+        "description": "take 5 tablets a day",
+        "active": true
+      }
+    ]
+  }
+}
+```
+
+### `POST /saas_api/add_dosage`
+Creates a new dosage instruction.
+
+**Request Body**
+```json
+{
+  "token": "<token>",
+  "code": "T3D",
+  "description": "Take 3 times a day",
+  "active": true
+}
+```
+
+### `POST /saas_api/edit_dosage`
+Updates an existing dosage.
+
+**Request Body**
+```json
+{
+  "token": "<token>",
+  "dosage_id": 2,
+  "description": "take 2 tablets a day"
+}
+```
+
+---
+
+## 13. Unit of Measure (UOM) Endpoints
+
+### `POST /saas_api/get_uoms`
+Retrieves all available system Units of Measure.
+
+**Response**
+```json
+{
+  "message": {
+    "uoms": [
+      {
+        "id": 1,
+        "name": "Units",
+        "factor": 1.0,
+        "rounding": 0.01
+      }
+    ]
+  }
+}
+```
+
+### `POST /saas_api/get_product_packagings`
+Retrieves all product packagings / UOM barcodes mapping.
+
+**Response**
+```json
+{
+  "message": {
+    "packagings": [
+      {
+        "id": 1,
+        "barcode": "00192837",
+        "uom_name": "Box of 10",
+        "product_code": "CHAIR-001",
+        "factor": 10.0
+      }
+    ]
+  }
+}
+```
+
+---
+
 *Generated for the `saas_api` Odoo 19 custom module.*

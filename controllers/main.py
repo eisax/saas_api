@@ -274,6 +274,8 @@ class SaasApiController(http.Controller):
                     "customers": dedup_customers,
                     "warehouse_items": warehouse_items,
                     "time_zone": timezone,
+                    "is_cashier": getattr(user_record, 'is_cashier', False),
+                    "is_pharmacist": getattr(user_record, 'is_pharmacist', False),
                     "company": {
                         "name": company_name,
                         "email": company_email,
@@ -383,7 +385,20 @@ class SaasApiController(http.Controller):
                         "maximum_net_rate": tax.amount or 0.0
                     })
 
-                products_list.append({
+                # Gather batch/lot information if available
+                batches_data = []
+                if hasattr(env, 'stock.lot') and product.tracking in ['lot', 'serial']:
+                    lots = env['stock.lot'].search([('product_id', '=', product.id)])
+                    for lot in lots:
+                        lot_qty = sum(q.quantity for q in env['stock.quant'].search([('lot_id', '=', lot.id)]))
+                        if lot_qty > 0:
+                            batches_data.append({
+                                "batch_number": lot.name,
+                                "expiration_date": str(getattr(lot, 'expiration_date', '')) or "",
+                                "qty": lot_qty
+                            })
+
+                product_data = {
                     "itemcode": product.default_code or str(product.id),
                     "itemname": product.name,
                     "groupname": product.categ_id.name or "",
@@ -394,12 +409,22 @@ class SaasApiController(http.Controller):
                     "taxes": taxes_data,
                     "simple_code": product.default_code or "",
                     "is_sales_item": 1,
+                    "batches": batches_data,
                     "uom": {
                         "stock_uom": product.uom_id.name or "",
                         "conversions": [{"uom": product.uom_id.name or "", "conversion_factor": 1.0}]
                     },
                     "food_and_tourism_tax": 0, "food_tax": 0, "tourism_tax": 0, "cumulative": 0
-                })
+                }
+
+                # Pharmacy check
+                if getattr(env.company, 'hao_activate_pharmacy', False):
+                    product_data["is_pharmacy_product"] = getattr(product, 'is_pharmacy_product', False)
+                    product_data["requires_prescription"] = getattr(product, 'requires_prescription', False)
+                    dosage = getattr(product, 'dosage_id', False)
+                    product_data["dosage"] = dosage.name if dosage else ""
+
+                products_list.append(product_data)
         except Exception as e:
             _logger.error(f"Error listing Odoo products: {e}")
             return self._make_json_response({"error": str(e)}, status=500)
@@ -470,12 +495,28 @@ class SaasApiController(http.Controller):
                 if not product:
                     raise Exception(f"Product not found in Odoo database with code: {item_code}")
 
-                env['sale.order.line'].create({
+                uom_name = line.get('uom') or line.get('stock_uom')
+                uom = None
+                if uom_name:
+                    uom = env['uom.uom'].search([('name', '=', uom_name)], limit=1)
+
+                batch_number = line.get('batch_number') or line.get('lot_name')
+                lot = None
+                if batch_number:
+                    lot = env['stock.lot'].search([('name', '=', batch_number), ('product_id', '=', product.id)], limit=1)
+
+                line_vals = {
                     'order_id': sale_order.id,
                     'product_id': product.id,
                     'product_uom_qty': qty,
                     'price_unit': price,
-                })
+                }
+                if uom:
+                    line_vals['product_uom'] = uom.id
+                if lot:
+                    line_vals['lot_id'] = lot.id
+
+                env['sale.order.line'].create(line_vals)
 
             sale_order.action_confirm()
 
@@ -3387,3 +3428,194 @@ class SaasApiController(http.Controller):
         finally:
             if custom_cr:
                 custom_cr.close()
+
+    @http.route(['/saas_api/get_doctors', '/saas_api/doctors'], type='http', auth='public', methods=['POST', 'OPTIONS', 'GET'], csrf=False)
+    def get_doctors(self, **kwargs):
+        if request.httprequest.method == 'OPTIONS': return self._make_json_response({}, status=200)
+        token = request.httprequest.headers.get('Authorization')
+        params = self._get_request_json() or request.httprequest.args.to_dict()
+        if not token: token = params.get('token')
+        uid, login = self._verify_token(token)
+        if not uid: return self._make_json_response({"error": "Unauthorized"}, status=401)
+        env, custom_cr = self._get_env(user_id=uid)
+        try:
+            doctors = env['res.partner'].search([('is_doctor', '=', True)])
+            data = []
+            for d in doctors:
+                data.append({
+                    "id": d.id, "name": d.name, "email": d.email or "", "phone": d.phone or "",
+                    "doctor_reg_no": getattr(d, 'doctor_reg_no', ""),
+                    "is_doctor": True
+                })
+            return self._make_json_response({"message": {"doctors": data}})
+        except Exception as e: return self._make_json_response({"error": str(e)}, status=500)
+        finally:
+            if custom_cr: custom_cr.close()
+
+    @http.route('/saas_api/add_doctor', type='http', auth='public', methods=['POST', 'OPTIONS'], csrf=False)
+    def add_doctor(self, **kwargs):
+        if request.httprequest.method == 'OPTIONS': return self._make_json_response({}, status=200)
+        token = request.httprequest.headers.get('Authorization')
+        params = self._get_request_json()
+        if not token: token = params.get('token')
+        uid, login = self._verify_token(token)
+        if not uid: return self._make_json_response({"error": "Unauthorized"}, status=401)
+        env, custom_cr = self._get_env(user_id=uid)
+        try:
+            name = params.get('name')
+            if not name: return self._make_json_response({"error": "Missing name"}, status=400)
+            doctor = env['res.partner'].create({
+                'name': name, 'is_doctor': True,
+                'email': params.get('email', ''), 'phone': params.get('phone', ''),
+                'doctor_reg_no': params.get('doctor_reg_no', '')
+            })
+            if custom_cr: custom_cr.commit()
+            return self._make_json_response({"message": "Doctor created", "doctor_id": doctor.id})
+        except Exception as e:
+            if custom_cr: custom_cr.rollback()
+            return self._make_json_response({"error": str(e)}, status=500)
+        finally:
+            if custom_cr: custom_cr.close()
+
+    @http.route('/saas_api/edit_doctor', type='http', auth='public', methods=['POST', 'PUT', 'OPTIONS'], csrf=False)
+    def edit_doctor(self, **kwargs):
+        if request.httprequest.method == 'OPTIONS': return self._make_json_response({}, status=200)
+        token = request.httprequest.headers.get('Authorization')
+        params = self._get_request_json()
+        if not token: token = params.get('token')
+        uid, login = self._verify_token(token)
+        if not uid: return self._make_json_response({"error": "Unauthorized"}, status=401)
+        env, custom_cr = self._get_env(user_id=uid)
+        try:
+            doc_id = params.get('id') or params.get('doctor_id')
+            if not doc_id: return self._make_json_response({"error": "Missing doctor_id"}, status=400)
+            doctor = env['res.partner'].browse(int(doc_id))
+            if not doctor.exists(): return self._make_json_response({"error": "Doctor not found"}, status=404)
+            vals = {}
+            if 'name' in params: vals['name'] = params['name']
+            if 'email' in params: vals['email'] = params['email']
+            if 'phone' in params: vals['phone'] = params['phone']
+            if 'doctor_reg_no' in params: vals['doctor_reg_no'] = params['doctor_reg_no']
+            doctor.write(vals)
+            if custom_cr: custom_cr.commit()
+            return self._make_json_response({"message": "Doctor updated", "doctor_id": doctor.id})
+        except Exception as e:
+            if custom_cr: custom_cr.rollback()
+            return self._make_json_response({"error": str(e)}, status=500)
+        finally:
+            if custom_cr: custom_cr.close()
+
+    @http.route(['/saas_api/get_uoms', '/saas_api/uoms'], type='http', auth='public', methods=['POST', 'OPTIONS', 'GET'], csrf=False)
+    def get_uoms(self, **kwargs):
+        if request.httprequest.method == 'OPTIONS': return self._make_json_response({}, status=200)
+        token = request.httprequest.headers.get('Authorization')
+        params = self._get_request_json() or request.httprequest.args.to_dict()
+        if not token: token = params.get('token')
+        uid, login = self._verify_token(token)
+        if not uid: return self._make_json_response({"error": "Unauthorized"}, status=401)
+        env, custom_cr = self._get_env(user_id=uid)
+        try:
+            uoms = env['uom.uom'].search([])
+            data = [{"id": u.id, "name": u.name, "factor": u.factor, "rounding": u.rounding} for u in uoms]
+            return self._make_json_response({"message": {"uoms": data}})
+        except Exception as e: return self._make_json_response({"error": str(e)}, status=500)
+        finally:
+            if custom_cr: custom_cr.close()
+
+    @http.route(['/saas_api/get_product_packagings', '/saas_api/product_packagings'], type='http', auth='public', methods=['POST', 'OPTIONS', 'GET'], csrf=False)
+    def get_product_packagings(self, **kwargs):
+        if request.httprequest.method == 'OPTIONS': return self._make_json_response({}, status=200)
+        token = request.httprequest.headers.get('Authorization')
+        params = self._get_request_json() or request.httprequest.args.to_dict()
+        if not token: token = params.get('token')
+        uid, login = self._verify_token(token)
+        if not uid: return self._make_json_response({"error": "Unauthorized"}, status=401)
+        env, custom_cr = self._get_env(user_id=uid)
+        try:
+            packagings = env['product.uom'].search([])
+            data = [{"id": p.id, "barcode": p.barcode, "uom_name": p.uom_id.name, "product_code": p.product_id.default_code, "factor": p.uom_id.factor} for p in packagings]
+            return self._make_json_response({"message": {"packagings": data}})
+        except Exception as e: return self._make_json_response({"error": str(e)}, status=500)
+        finally:
+            if custom_cr: custom_cr.close()
+
+    @http.route(['/saas_api/get_dosages', '/saas_api/dosages'], type='http', auth='public', methods=['POST', 'OPTIONS', 'GET'], csrf=False)
+    def get_dosages(self, **kwargs):
+        if request.httprequest.method == 'OPTIONS': return self._make_json_response({}, status=200)
+        token = request.httprequest.headers.get('Authorization')
+        params = self._get_request_json() or request.httprequest.args.to_dict()
+        if not token: token = params.get('token')
+        uid, login = self._verify_token(token)
+        if not uid: return self._make_json_response({"error": "Unauthorized"}, status=401)
+        env, custom_cr = self._get_env(user_id=uid)
+        try:
+            if getattr(env.company, 'hao_activate_pharmacy', False):
+                dosages = env['pharmacy.dosage'].search([])
+                data = [{"id": d.id, "code": d.code or "", "description": d.description or "", "active": getattr(d, 'active', True)} for d in dosages]
+            else:
+                data = []
+            return self._make_json_response({"message": {"dosages": data}})
+        except Exception as e: return self._make_json_response({"error": str(e)}, status=500)
+        finally:
+            if custom_cr: custom_cr.close()
+
+    @http.route('/saas_api/add_dosage', type='http', auth='public', methods=['POST', 'OPTIONS'], csrf=False)
+    def add_dosage(self, **kwargs):
+        if request.httprequest.method == 'OPTIONS': return self._make_json_response({}, status=200)
+        token = request.httprequest.headers.get('Authorization')
+        params = self._get_request_json()
+        if not token: token = params.get('token')
+        uid, login = self._verify_token(token)
+        if not uid: return self._make_json_response({"error": "Unauthorized"}, status=401)
+        env, custom_cr = self._get_env(user_id=uid)
+        try:
+            if not getattr(env.company, 'hao_activate_pharmacy', False):
+                return self._make_json_response({"error": "Pharmacy is not activated"}, status=400)
+            code = params.get('code')
+            description = params.get('description')
+            if not code or not description: return self._make_json_response({"error": "Missing code or description"}, status=400)
+            
+            existing = env['pharmacy.dosage'].search([("code", "=", code)], limit=1)
+            if existing:
+                dosage = existing
+                dosage.write({"description": description, "active": params.get('active', True)})
+            else:
+                dosage = env['pharmacy.dosage'].create({
+                    'code': code, 'description': description, 'active': params.get('active', True)
+                })
+            if custom_cr: custom_cr.commit()
+            return self._make_json_response({"message": "Dosage created/updated", "dosage_id": dosage.id})
+        except Exception as e:
+            if custom_cr: custom_cr.rollback()
+            return self._make_json_response({"error": str(e)}, status=500)
+        finally:
+            if custom_cr: custom_cr.close()
+
+    @http.route('/saas_api/edit_dosage', type='http', auth='public', methods=['POST', 'PUT', 'OPTIONS'], csrf=False)
+    def edit_dosage(self, **kwargs):
+        if request.httprequest.method == 'OPTIONS': return self._make_json_response({}, status=200)
+        token = request.httprequest.headers.get('Authorization')
+        params = self._get_request_json()
+        if not token: token = params.get('token')
+        uid, login = self._verify_token(token)
+        if not uid: return self._make_json_response({"error": "Unauthorized"}, status=401)
+        env, custom_cr = self._get_env(user_id=uid)
+        try:
+            if not getattr(env.company, 'hao_activate_pharmacy', False):
+                return self._make_json_response({"error": "Pharmacy is not activated"}, status=400)
+            dosage_id = params.get('id') or params.get('dosage_id')
+            if not dosage_id: return self._make_json_response({"error": "Missing dosage_id"}, status=400)
+            dosage = env['pharmacy.dosage'].browse(int(dosage_id))
+            if not dosage.exists(): return self._make_json_response({"error": "Dosage not found"}, status=404)
+            vals = {}
+            if 'code' in params: vals['code'] = params['code']
+            if 'description' in params: vals['description'] = params['description']
+            if 'active' in params: vals['active'] = params['active']
+            dosage.write(vals)
+            if custom_cr: custom_cr.commit()
+            return self._make_json_response({"message": "Dosage updated", "dosage_id": dosage.id})
+        except Exception as e:
+            if custom_cr: custom_cr.rollback()
+            return self._make_json_response({"error": str(e)}, status=500)
+        finally:
+            if custom_cr: custom_cr.close()
