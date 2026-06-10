@@ -2993,65 +2993,122 @@ class SaasApiController(http.Controller):
                         ('name', 'ilike', cost_center_name)
                     ], limit=1)
 
-            income = 0.0
-            expense = 0.0
-
-            # ── Base AML domain (always filter posted P&L account types) ─────
-            aml_domain = [
+            # ── Always use account.move.line (the GL) as source of truth ────
+            # This is what Odoo's P&L report queries, so numbers always match.
+            PL_TYPES = ['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost']
+            base_domain = [
                 ('company_id', '=', company.id),
                 ('display_type', 'not in', ('line_section', 'line_note')),
                 ('parent_state', '=', 'posted'),
-                ('account_id.account_type', 'in', [
-                    'income', 'income_other',
-                    'expense', 'expense_depreciation', 'expense_direct_cost'
-                ]),
+                ('account_id.account_type', 'in', PL_TYPES),
             ]
             if from_date:
-                aml_domain.append(('date', '>=', from_date))
+                base_domain.append(('date', '>=', from_date))
             if to_date:
-                aml_domain.append(('date', '<=', to_date))
+                base_domain.append(('date', '<=', to_date))
 
+            amls = env['account.move.line'].search(base_domain)
+
+            # Filter to cost center via analytic_distribution JSON key
             if analytic_account:
-                # ── Odoo 17+/19: analytic_distribution is a JSON dict
-                # {analytic_account_id (str): percentage}. We need move lines
-                # where this dict contains our account's ID as a key. ─────────
                 analytic_id_str = str(analytic_account.id)
+                amls = amls.filtered(
+                    lambda l: l.analytic_distribution and analytic_id_str in l.analytic_distribution
+                )
 
-                amls = env['account.move.line'].search(aml_domain)
-                for aml in amls:
-                    # analytic_distribution = {"42": 100.0} or {"42": 60, "7": 40}
-                    dist = aml.analytic_distribution or {}
-                    if analytic_id_str not in dist:
-                        continue  # this line doesn't belong to our cost center
+            # Aggregate per account into P&L sections
+            sections = {
+                'income':               {},
+                'income_other':         {},
+                'expense_direct_cost':  {},
+                'expense':              {},
+                'expense_depreciation': {},
+            }
+            for aml in amls:
+                acc_type = aml.account_id.account_type
+                if acc_type not in sections:
+                    continue
+                acc_name = aml.account_id.name
+                if acc_type in ('income', 'income_other'):
+                    amount = aml.credit - aml.debit   # positive = income
+                else:
+                    amount = aml.debit - aml.credit   # positive = cost
+                sections[acc_type][acc_name] = sections[acc_type].get(acc_name, 0.0) + amount
 
-                    # Weight the amount by the analytic distribution percentage
-                    pct = dist[analytic_id_str] / 100.0
-                    acc_type = aml.account_id.account_type
-                    if acc_type in ['income', 'income_other']:
-                        income += (aml.credit - aml.debit) * pct
-                    elif acc_type in ['expense', 'expense_depreciation', 'expense_direct_cost']:
-                        expense += (aml.debit - aml.credit) * pct
-            else:
-                # ── No cost center filter – full company P&L ─────────────────
-                amls = env['account.move.line'].search(aml_domain)
-                for aml in amls:
-                    acc_type = aml.account_id.account_type
-                    if acc_type in ['income', 'income_other']:
-                        income += (aml.credit - aml.debit)
-                    elif acc_type in ['expense', 'expense_depreciation', 'expense_direct_cost']:
-                        expense += (aml.debit - aml.credit)
+            def _sum(bucket):
+                return sum(bucket.values())
 
-            gross_profit_loss = income - expense
+            total_income       = _sum(sections['income'])
+            total_income_other = _sum(sections['income_other'])
+            total_direct_cost  = _sum(sections['expense_direct_cost'])
+            total_op_exp       = _sum(sections['expense'])
+            total_depreciation = _sum(sections['expense_depreciation'])
+
+            gross_profit     = total_income - total_direct_cost
+            operating_income = gross_profit - total_op_exp - total_depreciation
+            net_profit       = operating_income + total_income_other
+            total_expense    = total_direct_cost + total_op_exp + total_depreciation
+
+            currency = company.currency_id.name if company.currency_id else 'USD'
+
+            # ── Build report_summary in the exact format Dart expects ─────────
+            # Dart's ReportSummaryItem.fromJson reads: value, label, datatype,
+            # currency, type, indicator, color.
+            # type='separator' = section header row (no value).
+            # Dart picks totalIncome from label.contains('Total Income'),
+            # totalExpense from 'Total Expense', profit from 'Profit'.
+            def _val(label, value, indicator='Up', color='green'):
+                return {
+                    'label':    label,
+                    'value':    round(value, 2),
+                    'datatype': 'Currency',
+                    'currency': currency,
+                    'type':     'value',
+                    'indicator': indicator if value >= 0 else 'Down',
+                    'color':    color if value >= 0 else 'red',
+                }
+
+            def _sep(label):
+                return {'label': label, 'value': None, 'datatype': None,
+                        'currency': None, 'type': 'separator', 'indicator': None, 'color': None}
+
+            report_summary = []
+            report_summary.append(_sep('Revenue'))
+            for name, amt in sorted(sections['income'].items()):
+                report_summary.append(_val(name, amt))
+            for name, amt in sorted(sections['income_other'].items()):
+                report_summary.append(_val(name, amt, color='blue'))
+            report_summary.append(_val('Total Income', total_income + total_income_other))
+
+            report_summary.append(_sep('Expenses'))
+            for name, amt in sorted(sections['expense_direct_cost'].items()):
+                report_summary.append(_val(name, amt, indicator='Down', color='orange'))
+            for name, amt in sorted(sections['expense'].items()):
+                report_summary.append(_val(name, amt, indicator='Down', color='orange'))
+            for name, amt in sorted(sections['expense_depreciation'].items()):
+                report_summary.append(_val(name, amt, indicator='Down', color='orange'))
+            report_summary.append(_val('Total Expense', total_expense, indicator='Down', color='red'))
+
+            report_summary.append(_sep('Result'))
+            report_summary.append(_val('Gross Profit', gross_profit))
+            report_summary.append(_val('Operating Income (or Loss)', operating_income))
+            report_summary.append(_val('Net Profit', net_profit))
 
             return self._make_json_response({
                 "message": {
-                    "income": round(income, 2),
-                    "expense": round(expense, 2),
-                    "gross_profit__loss": round(gross_profit_loss, 2),
-                    "cost_center": analytic_account.name if analytic_account else None,
-                    "company": company.name,
-                    "from_date": from_date,
-                    "to_date": to_date,
+                    # Top-level fields read directly by Dart's fetchProfitLossReport
+                    "income":             round(total_income + total_income_other, 2),
+                    "expense":            round(total_expense, 2),
+                    "gross_profit__loss": round(net_profit, 2),
+                    # Extra breakdown fields
+                    "direct_cost":        round(total_direct_cost, 2),
+                    "operating_expense":  round(total_op_exp, 2),
+                    "gross_profit":       round(gross_profit, 2),
+                    "operating_income":   round(operating_income, 2),
+                    "net_profit":         round(net_profit, 2),
+                    "currency":           currency,
+                    # Full item list for Dart's ReportSummaryItem parsing
+                    "report_summary":     report_summary,
                 }
             })
             
