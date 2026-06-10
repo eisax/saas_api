@@ -2996,48 +2996,44 @@ class SaasApiController(http.Controller):
             income = 0.0
             expense = 0.0
 
+            # ── Base AML domain (always filter posted P&L account types) ─────
+            aml_domain = [
+                ('company_id', '=', company.id),
+                ('display_type', 'not in', ('line_section', 'line_note')),
+                ('parent_state', '=', 'posted'),
+                ('account_id.account_type', 'in', [
+                    'income', 'income_other',
+                    'expense', 'expense_depreciation', 'expense_direct_cost'
+                ]),
+            ]
+            if from_date:
+                aml_domain.append(('date', '>=', from_date))
+            if to_date:
+                aml_domain.append(('date', '<=', to_date))
+
             if analytic_account:
-                domain = [('account_id', '=', analytic_account.id), ('company_id', '=', company.id)]
-                if from_date:
-                    domain.append(('date', '>=', from_date))
-                if to_date:
-                    domain.append(('date', '<=', to_date))
-                
-                lines = env['account.analytic.line'].search(domain)
-                for line in lines:
-                    is_income = False
-                    is_expense = False
-                    if line.general_account_id:
-                        acc_type = line.general_account_id.account_type
-                        if acc_type in ['income', 'income_other']:
-                            is_income = True
-                        elif acc_type in ['expense', 'expense_depreciation', 'expense_direct_cost']:
-                            is_expense = True
-                    
-                    if not is_income and not is_expense:
-                        if line.amount >= 0:
-                            is_income = True
-                        else:
-                            is_expense = True
-                            
-                    if is_income:
-                        income += line.amount
-                    else:
-                        expense += abs(line.amount)
+                # ── Odoo 17+/19: analytic_distribution is a JSON dict
+                # {analytic_account_id (str): percentage}. We need move lines
+                # where this dict contains our account's ID as a key. ─────────
+                analytic_id_str = str(analytic_account.id)
+
+                amls = env['account.move.line'].search(aml_domain)
+                for aml in amls:
+                    # analytic_distribution = {"42": 100.0} or {"42": 60, "7": 40}
+                    dist = aml.analytic_distribution or {}
+                    if analytic_id_str not in dist:
+                        continue  # this line doesn't belong to our cost center
+
+                    # Weight the amount by the analytic distribution percentage
+                    pct = dist[analytic_id_str] / 100.0
+                    acc_type = aml.account_id.account_type
+                    if acc_type in ['income', 'income_other']:
+                        income += (aml.credit - aml.debit) * pct
+                    elif acc_type in ['expense', 'expense_depreciation', 'expense_direct_cost']:
+                        expense += (aml.debit - aml.credit) * pct
             else:
-                # Fallback to company-wide general ledger accounts
-                domain = [
-                    ('company_id', '=', company.id),
-                    ('display_type', 'not in', ('line_section', 'line_note')),
-                    ('parent_state', '=', 'posted'),
-                    ('account_id.account_type', 'in', ['income', 'income_other', 'expense', 'expense_depreciation', 'expense_direct_cost'])
-                ]
-                if from_date:
-                    domain.append(('date', '>=', from_date))
-                if to_date:
-                    domain.append(('date', '<=', to_date))
-                
-                amls = env['account.move.line'].search(domain)
+                # ── No cost center filter – full company P&L ─────────────────
+                amls = env['account.move.line'].search(aml_domain)
                 for aml in amls:
                     acc_type = aml.account_id.account_type
                     if acc_type in ['income', 'income_other']:
@@ -3049,10 +3045,13 @@ class SaasApiController(http.Controller):
 
             return self._make_json_response({
                 "message": {
-                    "income": income,
-                    "expense": expense,
-                    "gross_profit__loss": gross_profit_loss,
-                    "report_summary": []
+                    "income": round(income, 2),
+                    "expense": round(expense, 2),
+                    "gross_profit__loss": round(gross_profit_loss, 2),
+                    "cost_center": analytic_account.name if analytic_account else None,
+                    "company": company.name,
+                    "from_date": from_date,
+                    "to_date": to_date,
                 }
             })
             
@@ -3096,6 +3095,7 @@ class SaasApiController(http.Controller):
             from_date = params.get('from_date') or params.get('date_from')
             to_date = params.get('to_date') or params.get('date_to')
 
+            # ── Resolve company ──────────────────────────────────────────────
             company = None
             if company_name:
                 company = env['res.company'].search([('name', '=', company_name)], limit=1)
@@ -3104,33 +3104,42 @@ class SaasApiController(http.Controller):
             if not company:
                 company = env.company
 
+            # ── Resolve user ─────────────────────────────────────────────────
             user_record = None
             if user_login_or_name:
                 user_record = env['res.users'].search([('login', '=', user_login_or_name)], limit=1)
                 if not user_record:
                     user_record = env['res.users'].search([('name', '=', user_login_or_name)], limit=1)
+                if not user_record:
+                    user_record = env['res.users'].search([('name', 'ilike', user_login_or_name)], limit=1)
 
+            # ── Resolve analytic account (cost center) ───────────────────────
             analytic_account = None
             if cost_center_name:
                 analytic_account = env['account.analytic.account'].search([
-                    ('company_id', '=', company.id),
-                    ('name', '=', cost_center_name)
+                    ('name', 'ilike', cost_center_name)
                 ], limit=1)
-                if not analytic_account:
-                    analytic_account = env['account.analytic.account'].search([
-                        ('company_id', '=', company.id),
-                        ('name', 'ilike', cost_center_name)
-                    ], limit=1)
-                if not analytic_account:
-                    analytic_account = env['account.analytic.account'].search([
-                        ('name', '=', cost_center_name)
-                    ], limit=1)
-                if not analytic_account:
-                    analytic_account = env['account.analytic.account'].search([
-                        ('name', 'ilike', cost_center_name)
-                    ], limit=1)
 
-            # Build domain for posted customer invoices (out_invoice)
+            # ── DEBUG: raw count of ALL posted out_invoices in this company ──
+            all_posted = env['account.move'].search_count([
+                ('move_type', '=', 'out_invoice'),
+                ('state', '=', 'posted'),
+                ('company_id', '=', company.id),
+            ])
+            # Raw count ignoring state (includes draft / cancelled)
+            all_any_state = env['account.move'].search_count([
+                ('move_type', '=', 'out_invoice'),
+                ('company_id', '=', company.id),
+            ])
+            # State breakdown for debug
+            state_breakdown = {}
+            for inv in env['account.move'].search([
+                ('move_type', '=', 'out_invoice'),
+                ('company_id', '=', company.id),
+            ]):
+                state_breakdown[inv.state] = state_breakdown.get(inv.state, 0) + 1
+
+            # ── Build domain for posted customer invoices (out_invoice) ───────
             domain = [
                 ('move_type', '=', 'out_invoice'),
                 ('state', '=', 'posted'),
@@ -3143,31 +3152,18 @@ class SaasApiController(http.Controller):
             if user_record:
                 domain.append(('invoice_user_id', '=', user_record.id))
 
-            if analytic_account:
-                analytic_line_domain = [('account_id', '=', analytic_account.id), ('company_id', '=', company.id)]
-                if from_date:
-                    analytic_line_domain.append(('date', '>=', from_date))
-                if to_date:
-                    analytic_line_domain.append(('date', '<=', to_date))
-                
-                analytic_lines = env['account.analytic.line'].search(analytic_line_domain)
-                move_ids = analytic_lines.mapped('move_line_id.move_id').filtered(
-                    lambda m: m.move_type == 'out_invoice' and m.state == 'posted'
-                )
-                if user_record:
-                    move_ids = move_ids.filtered(lambda m: m.invoice_user_id == user_record or m.create_uid == user_record)
-                
-                if from_date:
-                    move_ids = move_ids.filtered(lambda m: m.invoice_date and str(m.invoice_date) >= from_date)
-                if to_date:
-                    move_ids = move_ids.filtered(lambda m: m.invoice_date and str(m.invoice_date) <= to_date)
-                
-                total_count = len(move_ids)
-                total_amount = sum(move_ids.mapped('amount_total'))
-            else:
-                moves = env['account.move'].search(domain)
-                total_count = len(moves)
-                total_amount = sum(moves.mapped('amount_total'))
+            moves = env['account.move'].search(domain)
+            total_count = len(moves)
+            total_amount = sum(moves.mapped('amount_total'))
+
+            _logger.warning(
+                "SaaS invoice report DEBUG: company=%s, user=%s, cost_center=%s, "
+                "from=%s, to=%s, domain=%s, count=%s, amount=%s, "
+                "all_posted=%s, all_any_state=%s, states=%s",
+                company.name, user_login_or_name, cost_center_name,
+                from_date, to_date, domain, total_count, total_amount,
+                all_posted, all_any_state, state_breakdown
+            )
 
             return self._make_json_response({
                 "message": {
@@ -3176,6 +3172,30 @@ class SaasApiController(http.Controller):
                         "total_count": total_count,
                         "total_amount": total_amount
                     }
+                },
+                # Temporary debug block – remove after diagnosis
+                "_debug": {
+                    "received_params": {
+                        "company": company_name,
+                        "cost_center": cost_center_name,
+                        "user": user_login_or_name,
+                        "from_date": from_date,
+                        "to_date": to_date,
+                    },
+                    "resolved": {
+                        "company_id": company.id,
+                        "company_name": company.name,
+                        "user_id": user_record.id if user_record else None,
+                        "user_name": user_record.name if user_record else None,
+                        "analytic_account_id": analytic_account.id if analytic_account else None,
+                        "analytic_account_name": analytic_account.name if analytic_account else None,
+                    },
+                    "query_domain": str(domain),
+                    "all_posted_invoices_this_company": all_posted,
+                    "all_invoices_any_state_this_company": all_any_state,
+                    "state_breakdown": state_breakdown,
+                    "filtered_count": total_count,
+                    "filtered_amount": total_amount,
                 }
             })
             
