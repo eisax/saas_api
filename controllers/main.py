@@ -2028,7 +2028,9 @@ class SaasApiController(http.Controller):
             return self._make_json_response({"error": str(e)}, status=500)
         finally:
             if custom_cr:
-                custom_cr.c    # =========================================================================
+                custom_cr.close()
+
+    # =========================================================================
     # /api/resource/Payment Entry  (GET/POST)
     # =========================================================================
     @http.route(['/api/resource/Payment Entry', '/api/resource/Payment Entry/<string:payment_name>'], type='http', auth='public', methods=['POST', 'GET', 'OPTIONS'], csrf=False)
