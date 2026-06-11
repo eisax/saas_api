@@ -481,13 +481,19 @@ class SaasApiController(http.Controller):
             odoo_users = env['res.users'].search([('share', '=', False)])
             
             for u in odoo_users:
+                role_val = u.role if hasattr(u, 'role') else ""
+                if role_val == "group_system":
+                    role_val = "admin"
+                elif role_val == "group_user":
+                    role_val = "user"
+                    
                 users_list.append({
                     "id": u.id,
                     "name": u.name,
                     "login": u.login,
-                    "email": u.email,
+                    "email": u.email or "",
                     "active": u.active,
-                    "role": u.role if hasattr(u, 'role') else "",
+                    "role": role_val,
                     "is_pharmacist": bool(getattr(u, 'is_pharmacist', False)),
                     "is_cashier": bool(getattr(u, 'is_cashier', False)),
                     "company_id": u.company_id.id,

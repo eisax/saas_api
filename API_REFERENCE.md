@@ -845,7 +845,7 @@ Authorization: <token>
         "login": "admin",
         "email": "admin@example.com",
         "active": true,
-        "role": "group_system",
+        "role": "admin",
         "is_pharmacist": false,
         "is_cashier": false,
         "company_id": 1,
