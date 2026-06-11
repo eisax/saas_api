@@ -598,6 +598,29 @@ class SaasApiController(http.Controller):
 
             sale_order.action_confirm()
 
+            # Automatically validate delivery picking and create invoice
+            try:
+                for picking in sale_order.picking_ids:
+                    if picking.state in ['cancel', 'done']:
+                        continue
+                    for move in picking.move_ids:
+                        move.quantity = move.product_uom_qty
+                        if hasattr(move, 'picked'):
+                            move.picked = True
+                    for move_line in picking.move_ids.mapped('move_line_ids'):
+                        if hasattr(move_line, 'quantity_product_uom'):
+                            move_line.quantity = move_line.quantity_product_uom
+                        else:
+                            move_line.quantity = move_line.product_uom_qty
+                    picking.with_context(skip_immediate=True, skip_backorder=True).button_validate()
+
+                invoices = sale_order._create_invoices()
+                if invoices:
+                    for inv in invoices:
+                        inv.action_post()
+            except Exception as inv_err:
+                _logger.warning(f"SaaS API: Could not create/post invoice for Sale Order {sale_order.name}: {inv_err}")
+
             if custom_cr:
                 custom_cr.commit()
 
@@ -2273,11 +2296,26 @@ class SaasApiController(http.Controller):
                             ref_doctype = ref.get('reference_doctype')
                             ref_name = ref.get('reference_name')
                             if ref_doctype == 'Sales Invoice' and ref_name:
+                                # 1. Try search by invoice name directly
                                 invoice = env['account.move'].search([
                                     ('name', '=', ref_name), 
                                     ('move_type', '=', 'out_invoice'),
                                     ('state', '=', 'posted')
                                 ], limit=1)
+                                
+                                # 2. Try search by origin (Sales Order name)
+                                if not invoice:
+                                    invoice = env['account.move'].search([
+                                        ('invoice_origin', '=', ref_name), 
+                                        ('move_type', '=', 'out_invoice'),
+                                        ('state', '=', 'posted')
+                                    ], limit=1)
+                                
+                                # 3. Try search via sale.order record
+                                if not invoice:
+                                    so = env['sale.order'].search([('name', '=', ref_name)], limit=1)
+                                    if so and so.invoice_ids:
+                                        invoice = so.invoice_ids.filtered(lambda m: m.move_type == 'out_invoice' and m.state == 'posted')[:1]
                                 
                                 if invoice:
                                     payment_lines = payment.line_ids.filtered(lambda line: line.account_id.account_type in ('asset_receivable', 'liability_payable') and not line.reconciled)
