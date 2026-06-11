@@ -398,6 +398,22 @@ class SaasApiController(http.Controller):
                                 "qty": lot_qty
                             })
 
+                # Gather lots_serials info
+                lots_serials_data = []
+                if hasattr(env, 'stock.lot') and product.tracking in ['lot', 'serial']:
+                    lots = env['stock.lot'].search([('product_id', '=', product.id)])
+                    for lot in lots:
+                        qty = sum(q.quantity for q in env['stock.quant'].search([('lot_id', '=', lot.id), ('location_id.usage', '=', 'internal')]))
+                        if qty > 0:
+                            lots_serials_data.append({
+                                "lot_id": lot.id,
+                                "lot_name": lot.name,
+                                "quantity": qty,
+                                "expiration_date": str(getattr(lot, 'expiration_date', '')) if getattr(lot, 'expiration_date', False) else None,
+                                "use_date": str(getattr(lot, 'use_date', '')) if getattr(lot, 'use_date', False) else None,
+                                "removal_date": str(getattr(lot, 'removal_date', '')) if getattr(lot, 'removal_date', False) else None,
+                            })
+
                 product_data = {
                     "itemcode": product.default_code or str(product.id),
                     "itemname": product.name,
@@ -410,6 +426,10 @@ class SaasApiController(http.Controller):
                     "simple_code": product.default_code or "",
                     "is_sales_item": 1,
                     "batches": batches_data,
+                    "lots_serials": lots_serials_data,
+                    "is_pharmacy": bool(getattr(product, 'is_pharmacy', False)),
+                    "is_product_bundle": bool(getattr(product, 'is_product_bundle', False)),
+                    "allow_multi_uom": bool(getattr(product, 'allow_multi_uom', False)),
                     "uom": {
                         "stock_uom": product.uom_id.name or "",
                         "conversions": [{"uom": product.uom_id.name or "", "conversion_factor": 1.0}]
@@ -435,6 +455,53 @@ class SaasApiController(http.Controller):
         return self._make_json_response({
             "message": {
                 "products": products_list
+            },
+            "token_string": params.get('token_string', ""),
+            "token": token
+        })
+
+    @http.route(['/saas_api/users', '/saas_api/get_users'], type='http', auth='public', methods=['POST', 'OPTIONS'], csrf=False)
+    def get_users(self, **kwargs):
+        if request.httprequest.method == 'OPTIONS':
+            return self._make_json_response({}, status=200)
+
+        token = request.httprequest.headers.get('Authorization')
+        params = self._get_request_json()
+        if not token:
+            token = params.get('token')
+
+        uid, login = self._verify_token(token)
+        if not uid:
+            return self._make_json_response({"error": "Unauthorized"}, status=401)
+
+        env, custom_cr = self._get_env(user_id=uid)
+        try:
+            users_list = []
+            odoo_users = env['res.users'].search([('share', '=', False)])
+            
+            for u in odoo_users:
+                users_list.append({
+                    "id": u.id,
+                    "name": u.name,
+                    "login": u.login,
+                    "email": u.email,
+                    "active": u.active,
+                    "role": u.role if hasattr(u, 'role') else "",
+                    "is_pharmacist": bool(getattr(u, 'is_pharmacist', False)),
+                    "is_cashier": bool(getattr(u, 'is_cashier', False)),
+                    "company_id": u.company_id.id,
+                    "company_name": u.company_id.name if u.company_id else "",
+                })
+        except Exception as e:
+            _logger.error(f"Error listing Odoo users: {e}")
+            return self._make_json_response({"error": str(e)}, status=500)
+        finally:
+            if custom_cr:
+                custom_cr.close()
+
+        return self._make_json_response({
+            "message": {
+                "users": users_list
             },
             "token_string": params.get('token_string', ""),
             "token": token
