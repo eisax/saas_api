@@ -823,13 +823,21 @@ class SaasApiController(http.Controller):
             if custom_cr:
                 custom_cr.close()
 
-    @http.route(['/saas_api/get_sales_invoice', '/saas_api/sales_invoices'], type='http', auth='public', methods=['POST', 'OPTIONS'], csrf=False)
+    @http.route([
+        '/saas_api/get_sales_invoice',
+        '/saas_api/sales_invoices',
+        '/api/method/saas_api.www.api.get_sales_invoices'
+    ], type='http', auth='public', methods=['GET', 'POST', 'OPTIONS'], csrf=False)
     def get_sales_invoice(self, **kwargs):
         if request.httprequest.method == 'OPTIONS':
             return self._make_json_response({}, status=200)
 
         token = request.httprequest.headers.get('Authorization')
-        params = self._get_request_json()
+        if request.httprequest.method == 'GET':
+            params = request.httprequest.args.to_dict()
+        else:
+            params = self._get_request_json()
+
         if not token:
             token = params.get('token')
 
