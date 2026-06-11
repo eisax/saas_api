@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 {
     'name': 'SaaS API',
-    'version': '4.0',
+    'version': '1.4',
     'category': 'Sales',
     'summary': 'REST API endpoints for SaaS integrations',
     'description': """
