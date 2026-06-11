@@ -455,7 +455,11 @@ class SaasApiController(http.Controller):
             return self._make_json_response({"error": "Unauthorized"}, status=401)
 
         customer_name = params.get('customer') or ""
-        lines = params.get('lines', [])
+        lines = params.get('lines')
+        if lines is None:
+            lines = params.get('items')
+        if lines is None:
+            lines = []
 
         if not lines:
             return self._make_json_response({"error": "No items in sale"}, status=400)
@@ -480,8 +484,15 @@ class SaasApiController(http.Controller):
 
             for line in lines:
                 item_code = line.get('item_code')
-                qty = float(line.get('qty', 1.0))
-                price = float(line.get('price', 0.0))
+                qty_val = line.get('qty')
+                if qty_val is None:
+                    qty_val = line.get('quantity')
+                qty = float(qty_val) if qty_val is not None else 1.0
+
+                price_val = line.get('price')
+                if price_val is None:
+                    price_val = line.get('rate')
+                price = float(price_val) if price_val is not None else 0.0
 
                 product = env['product.product'].search([
                     '|', ('default_code', '=', item_code), ('barcode', '=', item_code)
