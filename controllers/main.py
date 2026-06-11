@@ -160,11 +160,12 @@ class SaasApiController(http.Controller):
                     user_record = env['res.users'].search([('login', '=', email)], limit=1)
                     if not user_record:
                         _logger.info("Auto-provisioning federated user %s", email)
+                        groups_field = 'group_ids' if 'group_ids' in env['res.users']._fields else 'groups_id'
                         user_record = env['res.users'].with_context(no_reset_password=True).create({
                             'name': name,
                             'login': email,
                             'email': email,
-                            'groups_id': [(6, 0, [env.ref('base.group_user').id, env.ref('base.group_erp_manager').id])]
+                            groups_field: [(6, 0, [env.ref('base.group_user').id, env.ref('base.group_erp_manager').id])]
                         })
                         import uuid
                         user_record.password = uuid.uuid4().hex
