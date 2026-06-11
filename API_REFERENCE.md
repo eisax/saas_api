@@ -130,6 +130,11 @@ Authorization: <token>
         ],
         "simple_code": "CHAIR-001",
         "is_sales_item": 1,
+        "batches": [],
+        "lots_serials": [],
+        "is_pharmacy": false,
+        "is_product_bundle": false,
+        "allow_multi_uom": true,
         "uom": {
           "stock_uom": "Units",
           "conversions": [ { "uom": "Units", "conversion_factor": 1.0 } ]
@@ -804,6 +809,52 @@ Retrieves all product packagings / UOM barcodes mapping.
       }
     ]
   }
+}
+```
+
+---
+
+## 14. Users
+
+### `POST /saas_api/get_users`
+### `POST /saas_api/users` _(alias)_
+
+Returns all internal system users along with their access roles (including pharmacy and cashier roles).
+
+**Headers**
+```
+Content-Type: application/json
+Authorization: <token>
+```
+
+**Request Body**
+```json
+{
+  "db": "your_database_name"
+}
+```
+
+**Response `200 OK`**
+```json
+{
+  "message": {
+    "users": [
+      {
+        "id": 2,
+        "name": "Administrator",
+        "login": "admin",
+        "email": "admin@example.com",
+        "active": true,
+        "role": "group_system",
+        "is_pharmacist": false,
+        "is_cashier": false,
+        "company_id": 1,
+        "company_name": "My Company"
+      }
+    ]
+  },
+  "token_string": "",
+  "token": "<token>"
 }
 ```
 
