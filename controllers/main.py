@@ -604,7 +604,10 @@ class SaasApiController(http.Controller):
             return self._make_json_response({
                 "message": "Sale created successfully",
                 "sale_order_id": sale_order.id,
-                "sale_order_name": sale_order.name
+                "sale_order_name": sale_order.name,
+                "data": {
+                    "name": sale_order.name
+                }
             })
 
         except Exception as e:
