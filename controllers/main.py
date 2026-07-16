@@ -1092,9 +1092,12 @@ class SaasApiController(http.Controller):
 
             partners = env['res.partner'].search(domain, limit=limit, order='name asc')
 
-            # Fallback: if no customer_rank records, return all contacts
+            # Fallback: if no customer_rank records, return all non-company contacts that are not internal users
             if not partners and not search_name:
-                partners = env['res.partner'].search([('is_company', '=', False)], limit=limit, order='name asc')
+                partners = env['res.partner'].search([
+                    ('is_company', '=', False),
+                    ('user_ids', '=', False)
+                ], limit=limit, order='name asc')
 
             result = []
             for p in partners:
@@ -3070,7 +3073,8 @@ class SaasApiController(http.Controller):
         env, custom_cr = self._get_env(user_id=uid)
         
         try:
-            domain = [('state', 'in', ['draft', 'sent'])]
+            # Fetch all orders (Quotations, Sent Quotations, Confirmed Sales, and Done Sales)
+            domain = [('state', 'in', ['draft', 'sent', 'sale', 'done'])]
             
             orders = env['sale.order'].search(domain, limit=100, order='date_order desc')
             
